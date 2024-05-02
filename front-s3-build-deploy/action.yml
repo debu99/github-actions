@@ -1,0 +1,125 @@
+name: S3 Build and Copy
+
+inputs:
+  aws_account_id:
+    required: false
+    type: string
+  aws_region:
+    required: false
+    type: string
+    default: 'us-west-2'
+  iam_role:
+    required: true
+    type: string
+  node_version:
+    required: false
+    type: string
+    default: '18'
+  s3_bucket:
+    required: true
+    type: string
+  artifacts_folder:
+    required: false
+    type: string
+    default: 'build'
+  including_folder_name:
+    required: false
+    type: string
+    default: 'false'
+  cloudfront_distribution_id:
+    required: false
+    type: string
+    default: ''
+  package_manager:
+    required: false
+    type: string
+    default: 'yarn'
+  run_lint:
+    required: false
+    type: string
+    default: 'false'
+  run_test:
+    required: false
+    type: string
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-region: ${{ inputs.aws_region }}
+        role-to-assume: arn:aws:iam::${{ inputs.aws_account_id }}:role/${{ inputs.iam_role }}
+
+    - run: aws sts get-caller-identity
+      shell: bash
+
+    - name: Install Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node_version }}
+
+    - name: Yarn install
+      if: ${{ inputs.package_manager == 'yarn' }}
+      run: yarn install
+      shell: bash
+
+    - name: Yarn Build
+      if: ${{ inputs.package_manager == 'yarn' }}
+      run: yarn build
+      shell: bash
+
+    - name: NPM install
+      if: ${{ inputs.package_manager == 'npm' }}
+      run: npm install
+      shell: bash
+
+    - name: NPM Lint
+      if: ${{ inputs.package_manager == 'npm' && inputs.run_lint == 'true' }}
+      run: npm run lint
+      shell: bash
+
+    - name: NPM Test
+      if: ${{ inputs.package_manager == 'npm' && inputs.run_test == 'true' }}
+      run: npm run test
+      shell: bash
+    
+    - name: NPM Build
+      if: ${{ inputs.package_manager == 'npm' }}
+      run: npm run build
+      shell: bash
+
+    - name: S3 Copy
+      run: |
+        ls -al
+        input_folders=${{ inputs.artifacts_folder }}
+        folders=(`echo ${input_folders//,/$' '}`)
+        for folder in "${folders[@]}"; do
+          echo "[INFO] folder=$folder"
+          if [[ -d "${folder}" ]]; then
+            echo "[INFO] ${folder} exists"
+          else
+            echo "[ERROR] ${folder} does not exist"
+            exit 1
+          fi
+          if [[ "${{ inputs.including_folder_name }}" == "true" ]]; then
+            target_path=${{inputs.s3_bucket}}/${folder}
+          else
+            target_path=${{inputs.s3_bucket}}
+          fi
+          echo "[INFO] Copy non-js ..."
+          aws s3 cp ${folder} s3://${target_path}/ --recursive --exclude "*.js"
+          echo "[INFO] Copy js ..."
+          aws s3 cp ${folder} s3://${target_path}/ --recursive --exclude "*" --include "*.js" --content-type "application/javascript"
+        done
+      shell: bash
+
+    - name: Invalidate CloudFront
+      if: ${{ inputs.cloudfront_distribution_id != '' }}
+      run: |
+        RET=`aws cloudfront create-invalidation --distribution-id ${{ inputs.cloudfront_distribution_id }} --paths "/*"`
+        INVALIDATION_ID=`echo $RET | jq -r '.Invalidation.Id'`
+        aws cloudfront wait invalidation-completed --id ${INVALIDATION_ID} --distribution-id ${{ inputs.cloudfront_distribution_id }}
+        echo "[INFO] Invalidation completed"
+      shell: bash
