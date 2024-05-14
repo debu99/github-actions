@@ -1,0 +1,84 @@
+name: 'Lambda Deployment Action'
+description: 'A composite action to build and deploy a Lambda function'
+
+inputs:
+  aws_account_id:
+    required: true
+    description: 'The AWS account ID'
+  aws_region:
+    required: true
+    description: 'The AWS region to deploy the Lambda function'
+  aws_iam_role:
+    required: true
+    description: 'The IAM role to assume'
+  lambda_bucket:
+    required: true
+    description: 'The S3 bucket to store the Lambda function code'
+  function_name:
+    required: true
+    description: 'The name of the Lambda function'
+  workdir:
+    required: true
+    description: 'The directory containing the Lambda function code'
+  python_version:
+    required: false
+    description: 'The version of Python to use'
+    default: '3.12'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set Environment Variable
+      shell: bash
+      run: |
+        COMMIT_SHA=${GITHUB_SHA::6}
+        echo "[INFO] COMMIT_SHA=$COMMIT_SHA"
+        echo "COMMIT_SHA=${COMMIT_SHA}" >> $GITHUB_ENV
+
+    - name: Setup Python
+      id: setup-python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    - name: Zip lambda
+      shell: bash
+      run: |
+        pwd
+        ls -al
+        mkdir package
+        pip3 install --target ./package -r requirements.txt
+        cd package
+        zip -r ../${function_name}_${COMMIT_SHA}.zip .
+        cd ..
+        zip ${function_name}_${COMMIT_SHA}.zip *.py
+        ls -al
+      working-directory: ${{ inputs.workdir }}
+      env:
+        function_name: ${{ inputs.function_name }}
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-region: ${{ inputs.aws_region }}
+        role-to-assume: arn:aws:iam::${{ inputs.aws_account_id }}:role/${{ inputs.aws_iam_role }}
+
+    - run: aws sts get-caller-identity
+      shell: bash
+
+    - name: Publish function
+      shell: bash
+      run: |
+        TARGET_ZIP=${function_name}_${COMMIT_SHA}.zip
+        echo "[INFO] function_name=${function_name} lambda_bucket=${lambda_bucket} TARGET_ZIP=${TARGET_ZIP} workdir=${workdir}"
+        ls -al
+        aws s3 cp ${TARGET_ZIP} s3://${lambda_bucket}/
+        aws s3 ls  s3://${lambda_bucket}/${TARGET_ZIP}
+        aws lambda update-function-code --function-name ${function_name} --s3-bucket ${lambda_bucket} --s3-key ${TARGET_ZIP} --publish
+        aws lambda wait function-active-v2 --function-name $function_name
+        aws lambda wait function-updated-v2 --function-name $function_name
+        aws lambda wait published-version-active --function-name $function_name
+      working-directory: ${{ inputs.workdir }}
