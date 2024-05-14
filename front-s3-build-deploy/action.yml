@@ -3,44 +3,44 @@ name: S3 Build and Copy
 inputs:
   aws_account_id:
     required: false
-    type: string
+    description: 'The AWS account ID'
   aws_region:
     required: false
-    type: string
+    description: 'The AWS region to deploy'
     default: 'us-west-2'
   iam_role:
     required: true
-    type: string
+    description: 'The IAM role to assume'
   node_version:
     required: false
-    type: string
+    description: 'The version of Node.js to use'
     default: '18'
   s3_bucket:
     required: true
-    type: string
+    description: 'The S3 bucket to store the build artifacts'
   artifacts_folder:
     required: false
-    type: string
+    description: 'The folder containing the build artifacts'
     default: 'build'
   including_folder_name:
     required: false
-    type: string
+    description: 'Whether to include the folder name in the S3 path'
     default: 'false'
   cloudfront_distribution_id:
     required: false
-    type: string
+    description: 'The CloudFront distribution ID to invalidate'
     default: ''
   package_manager:
     required: false
-    type: string
+    description: 'The package manager to use'
     default: 'yarn'
   run_lint:
     required: false
-    type: string
+    description: 'Whether to run lint'
     default: 'false'
   run_test:
     required: false
-    type: string
+    description: 'Whether to run test'
     default: 'false'
 
 runs:

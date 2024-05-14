@@ -81,4 +81,7 @@ runs:
         aws lambda wait function-active-v2 --function-name $function_name
         aws lambda wait function-updated-v2 --function-name $function_name
         aws lambda wait published-version-active --function-name $function_name
+      env:
+        lambda_bucket: ${{ inputs.lambda_bucket }}
+        function_name: ${{ inputs.function_name }}
       working-directory: ${{ inputs.workdir }}
