@@ -20,9 +20,13 @@ inputs:
   workdir:
     required: true
     description: 'The directory containing the Lambda function code'
-  python_version:
+  language:
     required: false
-    description: 'The version of Python to use'
+    description: 'The language of the Lambda function'
+    default: 'python'
+  version:
+    required: false
+    description: 'The version to use'
     default: '3.12'
 
 runs:
@@ -39,12 +43,21 @@ runs:
         echo "COMMIT_SHA=${COMMIT_SHA}" >> $GITHUB_ENV
 
     - name: Setup Python
+      if: ${{ inputs.language == 'python' }}
       id: setup-python
       uses: actions/setup-python@v5
       with:
-        python-version: ${{ inputs.python_version }}
+        python-version: ${{ inputs.version }}
 
-    - name: Zip lambda
+    - name: Setup Node.js
+      if: ${{ inputs.language == 'node' }}
+      id: setup-node
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.version }}
+
+    - name: Zip Python lambda
+      if: ${{ inputs.language == 'python' }}
       shell: bash
       run: |
         pwd
@@ -55,6 +68,19 @@ runs:
         zip -r ../${function_name}_${COMMIT_SHA}.zip .
         cd ..
         zip ${function_name}_${COMMIT_SHA}.zip *.py
+        ls -al
+      working-directory: ${{ inputs.workdir }}
+      env:
+        function_name: ${{ inputs.function_name }}
+
+    - name: Zip Node.js lambda
+      if: ${{ inputs.language == 'node' }}
+      shell: bash
+      run: |
+        pwd
+        ls -al
+        npm install
+        zip -r ${function_name}_${COMMIT_SHA}.zip .
         ls -al
       working-directory: ${{ inputs.workdir }}
       env:
