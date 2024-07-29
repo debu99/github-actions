@@ -50,7 +50,7 @@ runs:
         python-version: ${{ inputs.version }}
 
     - name: Setup Node.js
-      if: ${{ inputs.language == 'node' }}
+      if: ${{ inputs.language == 'nodejs' }}
       id: setup-node
       uses: actions/setup-node@v4
       with:
@@ -74,7 +74,7 @@ runs:
         function_name: ${{ inputs.function_name }}
 
     - name: Zip Node.js lambda
-      if: ${{ inputs.language == 'node' }}
+      if: ${{ inputs.language == 'nodejs' }}
       shell: bash
       run: |
         pwd
