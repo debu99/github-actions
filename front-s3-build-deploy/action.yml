@@ -2,7 +2,7 @@ name: S3 Build and Copy
 
 inputs:
   aws_account_id:
-    required: false
+    required: true
     description: 'The AWS account ID'
   aws_region:
     required: false
@@ -42,6 +42,10 @@ inputs:
     required: false
     description: 'Whether to run test'
     default: 'false'
+  s3_copy:
+    required: false
+    description: 'Whether to use S3 copy instead of S3 sync'
+    default: 'true'
 
 runs:
   using: composite
@@ -108,11 +112,20 @@ runs:
           else
             target_path=${{inputs.s3_bucket}}
           fi
-          echo "[INFO] Copy non-js ..."
-          aws s3 cp ${folder} s3://${target_path}/ --recursive --exclude "*.js"
-          echo "[INFO] Copy js ..."
-          aws s3 cp ${folder} s3://${target_path}/ --recursive --exclude "*" --include "*.js" --content-type "application/javascript"
+          if [[ $S3_COPY == 'true' ]]; then
+            echo "[INFO] S3 copy non-js ..."
+            aws s3 cp ${folder} s3://${target_path}/ --recursive --exclude "*.js"
+            echo "[INFO] S3 copy js ..."
+            aws s3 cp ${folder} s3://${target_path}/ --recursive --exclude "*" --include "*.js" --content-type "application/javascript"
+          else
+            echo "[INFO] S3 sync non-js ..."
+            aws s3 sync ${folder} s3://${target_path}/ --exclude "*.js" --delete
+            echo "[INFO] S3 sync js ..."
+            aws s3 sync ${folder} s3://${target_path}/ --exclude "*" --include "*.js" --content-type "application/javascript" --delete
+          fi
         done
+      env: 
+        S3_COPY: ${{ inputs.s3_copy }}
       shell: bash
 
     - name: Invalidate CloudFront
