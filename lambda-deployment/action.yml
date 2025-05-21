@@ -56,31 +56,34 @@ runs:
       with:
         node-version: ${{ inputs.version }}
 
-    - name: Zip Python lambda
-      if: ${{ inputs.language == 'python' }}
+    - name: Package Lambda function
       shell: bash
       run: |
-        pwd
+        set -e
+        echo "[INFO] Packaging Lambda function for ${{ inputs.language }}"
+        echo "[INFO] Working directory: $(pwd)"
         ls -al
-        mkdir package
-        pip3 install --target ./package -r requirements.txt
-        cd package
-        zip -r ../${function_name}_${COMMIT_SHA}.zip .
-        cd ..
-        zip ${function_name}_${COMMIT_SHA}.zip *.py
-        ls -al
-      working-directory: ${{ inputs.workdir }}
-      env:
-        function_name: ${{ inputs.function_name }}
 
-    - name: Zip Node.js lambda
-      if: ${{ inputs.language == 'nodejs' }}
-      shell: bash
-      run: |
-        pwd
-        ls -al
-        npm install
-        zip -r ${function_name}_${COMMIT_SHA}.zip .
+        if [[ "${{ inputs.language }}" == "python" ]]; then
+          echo "[INFO] Installing Python dependencies from requirements.txt"
+          mkdir -p package
+          pip3 install --target ./package -r requirements.txt
+          echo "[INFO] Zipping Python dependencies"
+          (cd package && zip -r ../${function_name}_${COMMIT_SHA}.zip .)
+          echo "[INFO] Adding Python source files to zip"
+          zip -g ${function_name}_${COMMIT_SHA}.zip *.py
+        elif [[ "${{ inputs.language }}" == "nodejs" ]]; then
+          echo "[INFO] Installing Node.js dependencies"
+          npm install
+          echo "[INFO] Zipping Node.js project"
+          # Exclude the zip file itself if it's created in the current directory, and other unnecessary files
+          zip -r ${function_name}_${COMMIT_SHA}.zip . -x "*.zip" "package-lock.json" "README.md"
+        else
+          echo "[ERROR] Unsupported language: ${{ inputs.language }}. Please use 'python' or 'nodejs'."
+          exit 1
+        fi
+        
+        echo "[INFO] Listing files after zipping:"
         ls -al
       working-directory: ${{ inputs.workdir }}
       env:
@@ -92,22 +95,33 @@ runs:
         aws-region: ${{ inputs.aws_region }}
         role-to-assume: arn:aws:iam::${{ inputs.aws_account_id }}:role/${{ inputs.aws_iam_role }}
 
-    - run: aws sts get-caller-identity
+    - run: aws sts get-caller-identity # This step is fine, aws cli will exit non-zero on error
       shell: bash
 
     - name: Publish function
       shell: bash
       run: |
+        set -e
         TARGET_ZIP=${function_name}_${COMMIT_SHA}.zip
         echo "[INFO] function_name=${function_name} lambda_bucket=${lambda_bucket} TARGET_ZIP=${TARGET_ZIP} workdir=${workdir}"
+        echo "[INFO] Listing files before S3 upload in $(pwd):"
         ls -al
         aws s3 cp ${TARGET_ZIP} s3://${lambda_bucket}/
-        aws s3 ls  s3://${lambda_bucket}/${TARGET_ZIP}
+        echo "[INFO] Verifying file on S3"
+        aws s3 ls s3://${lambda_bucket}/${TARGET_ZIP}
+        echo "[INFO] Updating Lambda function code"
         aws lambda update-function-code --function-name ${function_name} --s3-bucket ${lambda_bucket} --s3-key ${TARGET_ZIP} --publish
-        aws lambda wait function-active-v2 --function-name $function_name
-        aws lambda wait function-updated-v2 --function-name $function_name
-        aws lambda wait published-version-active --function-name $function_name
+        echo "[INFO] Waiting for Lambda function to be active"
+        aws lambda wait function-active-v2 --function-name ${function_name}
+        echo "[INFO] Waiting for Lambda function to be updated"
+        aws lambda wait function-updated-v2 --function-name ${function_name}
+        # The 'published-version-active' waiter might be redundant if 'function-active-v2' and 'function-updated-v2' cover the state.
+        # However, keeping it if it serves a specific purpose for published versions.
+        echo "[INFO] Waiting for published version to be active"
+        aws lambda wait published-version-active --function-name ${function_name} --qualifier $(aws lambda publish-version --function-name ${function_name} | jq -r .Version)
+        echo "[INFO] Lambda deployment complete."
       env:
         lambda_bucket: ${{ inputs.lambda_bucket }}
         function_name: ${{ inputs.function_name }}
+        # workdir is available as GITHUB_WORKSPACE or inputs.workdir, not needed as env var for the script itself if working-directory is set.
       working-directory: ${{ inputs.workdir }}
