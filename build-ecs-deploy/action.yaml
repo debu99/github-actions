@@ -1,0 +1,138 @@
+name: ECS Build and Copy
+
+inputs:
+  env:
+    required: false
+    description: 'The environment to deploy to (e.g., dev, prod)'
+    default: ''
+  aws_region:
+    required: false
+    description: 'The AWS region to deploy'
+    default: 'us-west-2'
+  aws_iam_role:
+    required: true
+    description: 'The IAM role to assume for AWS operations'
+  docker_context:
+    required: false
+    description: 'The Docker context directory'
+    default: '.'
+  docker_file:
+    required: false
+    description: 'The Dockerfile to use for building the image'
+    default: 'Dockerfile'
+  ecr_repository:
+    required: false
+    description: 'The ECR repository name where the image will be pushed'
+  ecs_task_definition_name:
+    required: true
+    description: 'The name of the ECS task definition to update'
+  ecs_container_name:
+    required: true
+    description: 'The name of the container in the ECS task definition to update'
+  ecs_cluster_name:
+    required: true
+    description: 'The name of the ECS cluster where the service is running'
+  ecs_service_name:
+    required: true
+    description: 'The name of the ECS service to update'
+
+outputs:
+  image_name:
+    description: 'The full name of the built Docker image'
+    value: ${{ steps.compose-image-name.outputs.image_name }}
+  image_latest_name:
+    description: 'The full name of the latest Docker image'
+    value: ${{ steps.compose-image-name.outputs.image_latest_name }}
+  image_tag:
+    description: 'The tag of the built Docker image'
+    value: ${{ steps.compose-image-name.outputs.image_tag }}
+  image_latest_tag:
+    description: 'The tag of the latest Docker image'
+  value: ${{ steps.compose-image-name.outputs.image_latest_tag }}
+
+
+
+
+runs:
+  using: composite
+  steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: ${{ inputs.aws_region }}
+        role-to-assume: ${{ inputs.aws_iam_role }}
+        role-session-name: ${{ github.event.repository.name }}-${{ github.job }}
+
+    - run: aws sts get-caller-identity
+      shell: bash
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - uses: actions/checkout@v4
+  
+    - name: Compose image name
+      id: compose-image-name
+      run: |
+        GITHUB_SHA_SHORT=$(echo $GITHUB_SHA | cut -c1-7)
+        BRANCH_NAME=${GITHUB_REF##*/}
+        BRANCH_NAME=$(echo "$BRANCH_NAME" | tr -d '/')
+        if [[ ! -z ${{ inputs.env }} ]]; then
+          TAG_PREFIX=${{inputs.env}}_$(date +'%Y%m%d_%H%M%S')
+        else
+          TAG_PREFIX=${BRANCH_NAME}
+        fi
+        IMAGE_TAG=${TAG_PREFIX}_${GITHUB_SHA_SHORT}
+        IMAGE_LATEST_TAG=${TAG_PREFIX}_latest
+        IMAGE_NAME="${REGISTRY}/${REPO,,}:${IMAGE_TAG}"
+        IMAGE_LATEST_NAME="${REGISTRY}/${REPO,,}:${IMAGE_LATEST_TAG}"
+        echo "[INFO] IMAGE_NAME=${IMAGE_NAME} IMAGE_LATEST_NAME=${IMAGE_LATEST_NAME}"
+        echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
+        echo "image_latest_name=${IMAGE_LATEST_NAME}" >> $GITHUB_OUTPUT
+        echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+        echo "image_latest_tag=${IMAGE_LATEST_TAG}" >> $GITHUB_OUTPUT
+      env:
+        REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        REPO: ${{ inputs.ecr_repository }}
+      shell: bash
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ${{ inputs.docker_context }}
+        file: ${{ inputs.docker_file }}
+        push: true
+        provenance: false
+        tags: ${{ env.IMAGE_NAME }},${{ env.IMAGE_LATEST_NAME }}
+
+    - name: Get the Amazon ECS task definition
+      run: |
+        aws ecs describe-task-definition --include TAGS --task-definition ${ECS_TASK_DEFINITION} | jq '.taskDefinition' > ${ECS_TASK_DEFINITION}.json
+        cat ${ECS_TASK_DEFINITION}.json
+      env:
+        ECS_TASK_DEFINITION: ${{ inputs.ecs_task_definition_name }}
+      shell: bash
+
+    - name: Render Amazon ECS task definition with new tag
+      id: render-app-container
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: ${{ inputs.ecs_task_definition_name }}.json
+        container-name: ${{ inputs.ecs_container_name }}
+        image: ${{ steps.compose-image-name.outputs.image_name }}
+
+    - name: Show the Amazon ECS task definition
+      run: |
+        cat ${{ steps.render-app-container.outputs.task-definition }}
+      shell: bash
+
+    - name: Deploy Amazon ECS task definition
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+      with:
+        cluster: ${{ inputs.ecs_cluster_name }}
+        service: ${{ inputs.ecs_service_name }}
+        task-definition: ${{ steps.render-app-container.outputs.task-definition }}
+        wait-for-service-stability: true
+        force-new-deployment: true
+        wait-for-minutes: 10
