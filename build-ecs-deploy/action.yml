@@ -101,7 +101,7 @@ runs:
         file: ${{ inputs.docker_file }}
         push: true
         provenance: false
-        tags: ${{ env.IMAGE_NAME }},${{ env.IMAGE_LATEST_NAME }}
+        tags: ${{ steps.compose-image-name.outputs.image_name }},${{ steps.compose-image-name.outputs.image_latest_name }}
 
     - name: Get the Amazon ECS task definition
       run: |
