@@ -64,68 +64,65 @@ runs:
       with:
         node-version: ${{ inputs.node_version }}
 
-    - name: Yarn install
-      if: ${{ inputs.package_manager == 'yarn' }}
-      run: yarn install
-      shell: bash
-
-    - name: Yarn Build
-      if: ${{ inputs.package_manager == 'yarn' }}
-      run: yarn build
-      shell: bash
-
-    - name: NPM install
-      if: ${{ inputs.package_manager == 'npm' }}
-      run: npm install
-      shell: bash
-
-    - name: NPM Lint
-      if: ${{ inputs.package_manager == 'npm' && inputs.run_lint == 'true' }}
-      run: npm run lint
-      shell: bash
-
-    - name: NPM Test
-      if: ${{ inputs.package_manager == 'npm' && inputs.run_test == 'true' }}
-      run: npm run test
-      shell: bash
-    
-    - name: NPM Build
-      if: ${{ inputs.package_manager == 'npm' }}
-      run: npm run build
-      shell: bash
-
-    - name: S3 Copy
+    - name: Build Project
       run: |
-        ls -al
+        set -e # Exit immediately if a command exits with a non-zero status.
+
+        echo "[INFO] Detected package manager: ${{ inputs.package_manager }}"
+
+        if [[ "${{ inputs.package_manager }}" == "yarn" ]]; then
+          yarn install
+          if [[ "${{ inputs.run_lint }}" == "true" ]]; then
+            yarn lint
+          fi
+          if [[ "${{ inputs.run_test }}" == "true" ]]; then
+            yarn test
+          fi
+          yarn build
+        elif [[ "${{ inputs.package_manager }}" == "npm" ]]; then
+          npm install
+          if [[ "${{ inputs.run_lint }}" == "true" ]]; then
+            npm run lint
+          fi
+          if [[ "${{ inputs.run_test }}" == "true" ]]; then
+            npm run test
+          fi
+          npm run build
+        else
+          echo "[ERROR] Unsupported package manager: ${{ inputs.package_manager }}. Please use 'yarn' or 'npm'."
+          exit 1
+        fi
+      shell: bash
+
+    - name: Sync to S3
+      run: |
+        set -e # Exit immediately if a command exits with a non-zero status.
+
+        echo "[INFO] Syncing from artifacts folder: ${{ inputs.artifacts_folder }}"
+        echo "[INFO] Target S3 bucket: ${{ inputs.s3_bucket }}"
+        echo "[INFO] Including folder name in S3 path: ${{ inputs.including_folder_name }}"
+        echo "[INFO] Using S3 sync (s3_copy input is deprecated): ${{ inputs.s3_copy }}"
+
         input_folders=${{ inputs.artifacts_folder }}
-        folders=(`echo ${input_folders//,/$' '}`)
-        for folder in "${folders[@]}"; do
-          echo "[INFO] folder=$folder"
-          if [[ -d "${folder}" ]]; then
-            echo "[INFO] ${folder} exists"
-          else
-            echo "[ERROR] ${folder} does not exist"
-            exit 1
-          fi
-          if [[ "${{ inputs.including_folder_name }}" == "true" ]]; then
-            target_path=${{inputs.s3_bucket}}/${folder}
-          else
-            target_path=${{inputs.s3_bucket}}
-          fi
-          if [[ $S3_COPY == 'true' ]]; then
-            echo "[INFO] S3 copy non-js ..."
-            aws s3 cp ${folder} s3://${target_path}/ --recursive --exclude "*.js"
-            echo "[INFO] S3 copy js ..."
-            aws s3 cp ${folder} s3://${target_path}/ --recursive --exclude "*" --include "*.js" --content-type "application/javascript"
-          else
-            echo "[INFO] S3 sync non-js ..."
-            aws s3 sync ${folder} s3://${target_path}/ --exclude "*.js" --delete
-            echo "[INFO] S3 sync js ..."
-            aws s3 sync ${folder} s3://${target_path}/ --exclude "*" --include "*.js" --content-type "application/javascript" --delete
-          fi
-        done
-      env: 
-        S3_COPY: ${{ inputs.s3_copy }}
+        # Assuming artifacts_folder can be a single folder name, not comma-separated for sync
+        # If multiple folders need to be synced, this script would need adjustment or multiple sync steps.
+        # For simplicity, this refactor assumes artifacts_folder is a single build output directory.
+        
+        if [[ ! -d "${input_folders}" ]]; then
+          echo "[ERROR] Artifacts folder '${input_folders}' does not exist."
+          exit 1
+        fi
+
+        if [[ "${{ inputs.including_folder_name }}" == "true" ]]; then
+          target_path="s3://${{inputs.s3_bucket}}/${input_folders}"
+        else
+          target_path="s3://${{inputs.s3_bucket}}"
+        fi
+
+        echo "[INFO] Syncing to target path: ${target_path}"
+        aws s3 sync ${{ inputs.artifacts_folder }} ${target_path} --delete
+
+        echo "[INFO] S3 sync complete."
       shell: bash
 
     - name: Invalidate CloudFront
