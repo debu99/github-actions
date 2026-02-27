@@ -42,6 +42,14 @@ inputs:
   ecs_service_name:
     required: true
     description: 'The name of the ECS service to update'
+  verify_after_deploy:
+    required: false
+    description: 'If true, after a successful deploy wait then show service health (desired/running/pending and recent events)'
+    default: 'false'
+  verify_wait_seconds:
+    required: false
+    description: 'Seconds to wait before verify step (only when verify_after_deploy is true)'
+    default: '90'
 
 outputs:
   image_name:
@@ -242,4 +250,34 @@ runs:
           (aws logs get-log-events $LOG_GROUP_PARAM "$LOG_GROUP_VAL" --log-stream-name "$STREAM" --region "$REGION" --limit 500 --output json 2>/dev/null | jq -r '.events[]? | .message') || echo "(no events or stream not found)"
         done
         exit 0
+      shell: bash
+
+    # --- Optional: verify service health after successful deploy ---
+    # Runs only on success. Waits then shows desired/running/pending and recent events
+    # for the service this action deployed. For checking multiple services (e.g. API + Worker),
+    # keep a separate workflow step that calls describe-services for each.
+    - name: Verify deployment health
+      if: success() && steps.deploy-ecs.outcome == 'success' && inputs.verify_after_deploy == 'true'
+      run: |
+        WAIT="${VERIFY_WAIT_SECONDS:-90}"
+        echo "⏳ Waiting ${WAIT}s for ECS tasks to stabilize..."
+        sleep "$WAIT"
+
+        echo "🔍 Service health: ${{ inputs.ecs_service_name }}"
+        aws ecs describe-services \
+          --cluster "${{ inputs.ecs_cluster_name }}" \
+          --services "${{ inputs.ecs_service_name }}" \
+          --region "${{ inputs.aws_region }}" \
+          --query 'services[0].{desired: desiredCount, running: runningCount, pending: pendingCount, status: status}' \
+          --output table
+
+        echo "🔍 Recent deployment events..."
+        aws ecs describe-services \
+          --cluster "${{ inputs.ecs_cluster_name }}" \
+          --services "${{ inputs.ecs_service_name }}" \
+          --region "${{ inputs.aws_region }}" \
+          --query 'services[0].events[:5].message' \
+          --output yaml
+      env:
+        VERIFY_WAIT_SECONDS: ${{ inputs.verify_wait_seconds }}
       shell: bash
