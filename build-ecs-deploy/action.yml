@@ -134,7 +134,13 @@ runs:
         cat ${{ steps.render-app-container.outputs.task-definition }}
       shell: bash
 
+    - name: Record deployment start time
+      id: deploy-start-time
+      run: echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+      shell: bash
+
     - name: Deploy Amazon ECS task definition
+      id: deploy-ecs
       uses: aws-actions/amazon-ecs-deploy-task-definition@v2
       with:
         cluster: ${{ inputs.ecs_cluster_name }}
@@ -143,3 +149,97 @@ runs:
         wait-for-service-stability: true
         force-new-deployment: true
         wait-for-minutes: 10
+
+    # --- Deployment log steps: run whether deploy succeeded, failed, or timed out ---
+    # These steps use the deploy step id so they run only when we actually attempted a deploy.
+    # They never fail the job (best-effort) so you always get logs for debugging.
+
+    - name: Show ECS deployment logs (service events)
+      if: always() && steps.deploy-ecs.outcome != 'skipped'
+      run: |
+        # ECS service-level events (e.g. "has reached steady state", "unable to place task").
+        # Shows the last 50 events so you can see what happened during this deployment.
+        echo "=== ECS service events (last 50) ==="
+        aws ecs describe-services \
+          --cluster "${{ inputs.ecs_cluster_name }}" \
+          --services "${{ inputs.ecs_service_name }}" \
+          --query 'services[0].events[:50]' \
+          --output table \
+          --region "${{ inputs.aws_region }}" || true
+      shell: bash
+
+    - name: Show CloudWatch logs for this deployment's tasks
+      if: always() && steps.deploy-ecs.outcome != 'skipped'
+      env:
+        TASK_DEF_ARN: ${{ steps.deploy-ecs.outputs.task-definition-arn }}
+        DEPLOY_START: ${{ steps.deploy-start-time.outputs.started_at }}
+        CLUSTER: ${{ inputs.ecs_cluster_name }}
+        SERVICE: ${{ inputs.ecs_service_name }}
+        CONTAINER: ${{ inputs.ecs_container_name }}
+        REGION: ${{ inputs.aws_region }}
+      run: |
+        # Show CloudWatch container logs only for tasks that belong to THIS deployment
+        # (the task definition we just deployed). Includes:
+        # - On success: the RUNNING tasks that are now serving traffic.
+        # - On failure/timeout: the STOPPED tasks that ran the new version before rollback.
+        # We filter by task definition ARN + startedAt >= deploy start time (recorded
+        # before the deploy step) so we don't show logs from the previous version after ECS rolls back.
+
+        if [[ -z "$TASK_DEF_ARN" ]]; then
+          echo "No task definition ARN (deploy may have failed before register); skipping CloudWatch logs."
+          exit 0
+        fi
+
+        # Read log configuration from the deployed task definition (awslogs group and stream prefix).
+        TD_JSON=$(aws ecs describe-task-definition --task-definition "$TASK_DEF_ARN" --region "$REGION" --query 'taskDefinition' --output json)
+        LOG_DRIVER=$(echo "$TD_JSON" | jq -r --arg c "$CONTAINER" '.containerDefinitions[] | select(.name == $c) | .logConfiguration.logDriver // empty')
+        if [[ "$LOG_DRIVER" != "awslogs" ]]; then
+          echo "Container '$CONTAINER' does not use awslogs (logDriver=$LOG_DRIVER); skipping CloudWatch logs."
+          exit 0
+        fi
+        LOG_GROUP=$(echo "$TD_JSON" | jq -r --arg c "$CONTAINER" '.containerDefinitions[] | select(.name == $c) | .logConfiguration.options["awslogs-group"] // empty')
+        STREAM_PREFIX=$(echo "$TD_JSON" | jq -r --arg c "$CONTAINER" '.containerDefinitions[] | select(.name == $c) | .logConfiguration.options["awslogs-stream-prefix"] // "ecs"')
+        if [[ -z "$LOG_GROUP" ]]; then
+          echo "No awslogs-group for container '$CONTAINER'; skipping CloudWatch logs."
+          exit 0
+        fi
+        # Support both log group name and full ARN (e.g. arn:aws:logs:region:account:log-group:/path/name:*).
+        # API expects ARN without the trailing :* ; --log-group-name accepts only the name, --log-group-identifier accepts name or ARN.
+        if [[ "$LOG_GROUP" == arn:aws:logs:* ]]; then
+          LOG_GROUP_PARAM="--log-group-identifier"
+          LOG_GROUP_VAL="${LOG_GROUP%:\*}"
+        else
+          LOG_GROUP_PARAM="--log-group-name"
+          LOG_GROUP_VAL="$LOG_GROUP"
+        fi
+
+        # Find tasks from this deployment: same task definition ARN, started at or after our deploy start time.
+        # This yields RUNNING tasks after a successful deploy, and STOPPED tasks after a failed deploy.
+        TASK_ARNS=()
+        while IFS= read -r arn; do [[ -n "$arn" ]] && TASK_ARNS+=("$arn"); done < <(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --desired-status RUNNING --region "$REGION" --query 'taskArns[]' --output text)
+        while IFS= read -r arn; do [[ -n "$arn" ]] && TASK_ARNS+=("$arn"); done < <(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --desired-status STOPPED --region "$REGION" --max-items 50 --query 'taskArns[]' --output text)
+        if [[ ${#TASK_ARNS[@]} -eq 0 ]]; then
+          echo "No tasks found for service $SERVICE; skipping CloudWatch logs."
+          exit 0
+        fi
+
+        TASKS_JSON=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "${TASK_ARNS[@]}" --region "$REGION" --query 'tasks' --output json)
+        # Keep only tasks that match our deployment: this task def and started at or after deploy start.
+        DEPLOYMENT_TASK_IDS=($(echo "$TASKS_JSON" | jq -r --arg arn "$TASK_DEF_ARN" --arg start "$DEPLOY_START" '
+          [.[] | select(.taskDefinitionArn == $arn and (.startedAt != null) and (.startedAt >= $start)) | .taskArn | split("/") | last] | unique[]
+        '))
+        if [[ ${#DEPLOYMENT_TASK_IDS[@]} -eq 0 ]] || [[ "${DEPLOYMENT_TASK_IDS[0]}" == "null" ]]; then
+          echo "No tasks for this deployment (taskDef $TASK_DEF_ARN) started since $DEPLOY_START; showing tasks with this task def anyway."
+          DEPLOYMENT_TASK_IDS=($(echo "$TASKS_JSON" | jq -r --arg arn "$TASK_DEF_ARN" '[.[] | select(.taskDefinitionArn == $arn) | .taskArn | split("/") | last] | unique[]'))
+        fi
+
+        # ECS awslogs stream name format: {prefix}/{container-name}/{task-id}
+        for TASK_ID in "${DEPLOYMENT_TASK_IDS[@]}"; do
+          [[ -z "$TASK_ID" ]] || [[ "$TASK_ID" == "null" ]] && continue
+          STREAM="${STREAM_PREFIX}/${CONTAINER}/${TASK_ID}"
+          echo ""
+          echo "=== CloudWatch logs: $LOG_GROUP / $STREAM (task $TASK_ID) ==="
+          (aws logs get-log-events $LOG_GROUP_PARAM "$LOG_GROUP_VAL" --log-stream-name "$STREAM" --region "$REGION" --limit 500 --output json 2>/dev/null | jq -r '.events[]? | .message') || echo "(no events or stream not found)"
+        done
+        exit 0
+      shell: bash
