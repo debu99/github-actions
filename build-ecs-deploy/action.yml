@@ -69,7 +69,7 @@ runs:
   using: composite
   steps:
     - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
+      uses: aws-actions/configure-aws-credentials@v6
       with:
         aws-region: ${{ inputs.aws_region }}
         role-to-assume: ${{ inputs.aws_iam_role }}
@@ -82,7 +82,7 @@ runs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
   
     - name: Compose image name
       id: compose-image-name
@@ -223,9 +223,10 @@ runs:
 
         # Find tasks from this deployment: same task definition ARN, started at or after our deploy start time.
         # This yields RUNNING tasks after a successful deploy, and STOPPED tasks after a failed deploy.
+        # Use --output json + jq so we get one ARN per line; --output text would join ARNs with tabs and break describe-tasks.
         TASK_ARNS=()
-        while IFS= read -r arn; do [[ -n "$arn" ]] && TASK_ARNS+=("$arn"); done < <(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --desired-status RUNNING --region "$REGION" --query 'taskArns[]' --output text)
-        while IFS= read -r arn; do [[ -n "$arn" ]] && TASK_ARNS+=("$arn"); done < <(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --desired-status STOPPED --region "$REGION" --max-items 50 --query 'taskArns[]' --output text)
+        while IFS= read -r arn; do [[ -n "$arn" ]] && TASK_ARNS+=("$arn"); done < <(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --desired-status RUNNING --region "$REGION" --query 'taskArns[]' --output json | jq -r '.[]? // empty')
+        while IFS= read -r arn; do [[ -n "$arn" ]] && TASK_ARNS+=("$arn"); done < <(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --desired-status STOPPED --region "$REGION" --max-items 50 --query 'taskArns[]' --output json | jq -r '.[]? // empty')
         if [[ ${#TASK_ARNS[@]} -eq 0 ]]; then
           echo "No tasks found for service $SERVICE; skipping CloudWatch logs."
           exit 0
@@ -269,7 +270,7 @@ runs:
           --services "${{ inputs.ecs_service_name }}" \
           --region "${{ inputs.aws_region }}" \
           --query 'services[0].{desired: desiredCount, running: runningCount, pending: pendingCount, status: status}' \
-          --output table
+          --output table || true
 
         echo "🔍 Recent deployment events..."
         aws ecs describe-services \
@@ -277,7 +278,7 @@ runs:
           --services "${{ inputs.ecs_service_name }}" \
           --region "${{ inputs.aws_region }}" \
           --query 'services[0].events[:5].message' \
-          --output yaml
+          --output yaml || true
       env:
         VERIFY_WAIT_SECONDS: ${{ inputs.verify_wait_seconds }}
       shell: bash
