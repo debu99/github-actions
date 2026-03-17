@@ -32,7 +32,7 @@ inputs:
     default: ''
   package_manager:
     required: false
-    description: 'The package manager to use'
+    description: 'The package manager to use (npm, yarn, or pnpm)'
     default: 'yarn'
   run_lint:
     required: false
@@ -46,6 +46,9 @@ inputs:
     required: false
     description: 'Whether to use S3 copy instead of S3 sync'
     default: 'true'
+  npm_github_token:
+    required: false
+    description: 'Token for private packages from GitHub npm registry (npm.pkg.github.com). Use secrets.GITHUB_TOKEN for same repo, or a PAT with read:packages for other orgs/repos. Leave empty if no private GitHub packages.'
 
 runs:
   using: composite
@@ -63,6 +66,19 @@ runs:
       uses: actions/setup-node@v4
       with:
         node-version: ${{ inputs.node_version }}
+
+    - name: Enable pnpm
+      if: ${{ inputs.package_manager == 'pnpm' }}
+      run: corepack enable pnpm
+      shell: bash
+
+    - name: Configure GitHub npm registry auth
+      if: ${{ inputs.npm_github_token != '' }}
+      run: |
+        echo "//npm.pkg.github.com/:_authToken=${NPM_GITHUB_TOKEN}" >> .npmrc
+      env:
+        NPM_GITHUB_TOKEN: ${{ inputs.npm_github_token }}
+      shell: bash
 
     - name: Yarn install
       if: ${{ inputs.package_manager == 'yarn' }}
@@ -92,6 +108,26 @@ runs:
     - name: NPM Build
       if: ${{ inputs.package_manager == 'npm' }}
       run: npm run build
+      shell: bash
+
+    - name: pnpm install
+      if: ${{ inputs.package_manager == 'pnpm' }}
+      run: pnpm install
+      shell: bash
+
+    - name: pnpm Lint
+      if: ${{ inputs.package_manager == 'pnpm' && inputs.run_lint == 'true' }}
+      run: pnpm run lint
+      shell: bash
+
+    - name: pnpm Test
+      if: ${{ inputs.package_manager == 'pnpm' && inputs.run_test == 'true' }}
+      run: pnpm run test
+      shell: bash
+
+    - name: pnpm Build
+      if: ${{ inputs.package_manager == 'pnpm' }}
+      run: pnpm run build
       shell: bash
 
     - name: S3 Copy
