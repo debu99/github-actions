@@ -1,4 +1,5 @@
 name: S3 Build and Copy
+description: Build frontend assets and upload to S3
 
 inputs:
   aws_account_id:
@@ -32,7 +33,7 @@ inputs:
     default: ''
   package_manager:
     required: false
-    description: 'The package manager to use (npm, yarn, or pnpm)'
+    description: 'The package manager to use (npm, yarn, pnpm, or bun)'
     default: 'yarn'
   run_lint:
     required: false
@@ -58,7 +59,7 @@ runs:
   using: composite
   steps:
     - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
+      uses: aws-actions/configure-aws-credentials@v6
       with:
         aws-region: ${{ inputs.aws_region }}
         role-to-assume: arn:aws:iam::${{ inputs.aws_account_id }}:role/${{ inputs.iam_role }}
@@ -67,7 +68,7 @@ runs:
       shell: bash
 
     - name: Install Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v6
       with:
         node-version: ${{ inputs.node_version }}
 
@@ -76,6 +77,10 @@ runs:
       run: corepack enable pnpm
       working-directory: ${{ inputs.working_directory }}
       shell: bash
+
+    - name: Install Bun
+      if: ${{ inputs.package_manager == 'bun' }}
+      uses: oven-sh/setup-bun@v2
 
     - name: Configure GitHub npm registry auth
       if: ${{ inputs.npm_github_token != '' }}
@@ -143,6 +148,30 @@ runs:
     - name: pnpm Build
       if: ${{ inputs.package_manager == 'pnpm' }}
       run: pnpm run build
+      working-directory: ${{ inputs.working_directory }}
+      shell: bash
+
+    - name: Bun install
+      if: ${{ inputs.package_manager == 'bun' }}
+      run: bun install
+      working-directory: ${{ inputs.working_directory }}
+      shell: bash
+
+    - name: Bun Lint
+      if: ${{ inputs.package_manager == 'bun' && inputs.run_lint == 'true' }}
+      run: bun run lint
+      working-directory: ${{ inputs.working_directory }}
+      shell: bash
+
+    - name: Bun Test
+      if: ${{ inputs.package_manager == 'bun' && inputs.run_test == 'true' }}
+      run: bun run test
+      working-directory: ${{ inputs.working_directory }}
+      shell: bash
+
+    - name: Bun Build
+      if: ${{ inputs.package_manager == 'bun' }}
+      run: bun run build
       working-directory: ${{ inputs.working_directory }}
       shell: bash
 
